@@ -1,0 +1,32 @@
+services:
+  fastapi:
+    build: .
+    ports:
+      - "8000:80"
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    networks:
+      - elastic
+    env_file:
+      - .env  # .env dosyasını otomatik olarak yükle
+    depends_on:
+      - redis  # Redis'e bağlı olduğundan sonra başlar
+    command: uvicorn main:app --host 0.0.0.0 --port 80 --reload
+  
+  redis:
+    image: redis:latest
+    restart: always
+    ports:
+      - "6310:6379"
+    networks:
+      - elastic
+    volumes:
+      - redis_data:/data
+
+networks:
+  elastic:
+    external: true
+
+volumes:
+  redis_data:
