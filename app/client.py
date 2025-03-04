@@ -1,6 +1,7 @@
 from opensearchpy import OpenSearch
 import redis
 from config import config
+import psycopg2
 
 class OpenSearchClient:
     def __init__(self):
@@ -23,6 +24,47 @@ class OpenSearchClient:
         except Exception as e:
             print(f"Error connecting to OpenSearch: {e}")
             return None
+        
+class PostgresClient:
+    def __init__(self):
+        self.host = config.POSTGRES_HOST
+        self.port = config.POSTGRES_PORT
+        self.user = config.POSTGRES_USER
+        self.password = config.POSTGRES_PASSWORD
+        self.database = config.POSTGRES_DATABASE
+
+    def _connect(self):
+        try:
+            client = psycopg2.connect(
+                host=self.host,
+                port=self.port,
+                user=self.user,
+                password=self.password,
+                database=self.database
+            )
+            return client
+        except Exception as e:
+            print(f"Error connecting to PostgreSQL: {e}")
+            return None
+
+    def execute(self, query, params=None):
+        try:
+            conn = self._connect()
+            if conn is None:
+                return None
+            
+            cur = conn.cursor()
+            cur.execute(query, params)
+            conn.commit()
+            return cur
+        except Exception as e:
+            print(f"Error executing query: {e}")
+            return None
+        finally:
+            if 'cur' in locals():
+                cur.close()
+            if 'conn' in locals():
+                conn.close()
 
 class RedisClient:
     def __init__(self):

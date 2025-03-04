@@ -1,19 +1,29 @@
-import os
-from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
+from typing import Optional
 
-# .env dosyasını yükle
-load_dotenv()
+class Config(BaseSettings):
+    # OpenSearch ayarları
+    OPENSEARCH_URL: str = "192.168.1.70"
+    OPENSEARCH_PORT: int = 9200
+    OPENSEARCH_USER: str = "admin"
+    OPENSEARCH_PASSWORD: str = "123456789#heleN"
 
-class Config:
-    ENV = os.getenv("ENV", "production")
-    
-    # OpenSearch
-    OPENSEARCH_URL = os.getenv("OPENSEARCH_URL", "https://localhost:9200")
-    OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "admin")
-    OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "123456789#heleN")
-    OPENSEARCH_PORT = os.getenv("OPENSEARCH_PORT", "")
-    # Redis
-    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+    # Redis ayarları
+    REDIS_HOST: str = "redis"
+    REDIS_PORT: int = 6379
+
+    # PostgreSQL ayarları
+    POSTGRES_HOST: str = "192.168.1.70"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_USER: str = "postgres"
+    POSTGRES_PASSWORD: str = "helen*1"
+    POSTGRES_DATABASE: str = "flight_data"
+
+    # Environment ayarı
+    ENV: Optional[str] = "development"
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
 
 config = Config()
