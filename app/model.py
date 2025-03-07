@@ -1,180 +1,175 @@
 from langchain.chains import LLMChain
-from langchain_core.prompts import FewShotPromptTemplate, PromptTemplate
-from langchain_community.llms import HuggingFacePipeline
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from opensearchpy import OpenSearch
-from client import OpenSearchClient
-from main import get_flight_information
-
-o_s_client = OpenSearchClient()._connect()
-
-def huggingface_model_upload(model_name="Qwen/Qwen2.5-0.5B-Instruct"):
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16,
-        device_map="auto"
-    )
-
-    pipe = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_length=512,
-        temperature=1.0,
-        top_p=0.8,
-        do_sample=True,
-        repetition_penalty=1.2,
-        truncation=True,
-        padding=True,
-    )
-
-    llm = HuggingFacePipeline(pipeline=pipe)
-    return llm
-
-examples = [
-    {
-        "query": "Context: Found flight - Origin: Istanbul, Destination: London, Price: $850, Flight Duration: 240 minutes\nUser Question: Can I afford a trip to London with $500?",
-        "answer": "Based on the flight information I found, the ticket price to London is $850, which is unfortunately above your budget of $500. You might want to consider:\n1. Looking for off-season deals\n2. Booking well in advance\n3. Checking alternative airlines\n4. Setting up price alerts for better deals"
-    },
-    {
-        "query": "Context: Found flight - Origin: Paris, Destination: New York, Price: $580, Flight Duration: 480 minutes\nUser Question: I have $1000 for a flight to New York",
-        "answer": "Good news! With your budget of $1000, you can comfortably afford the flight to New York which costs $580. You'll even have $420 left that you could use for:\n1. Hotel accommodations\n2. Local transportation\n3. Travel insurance\n4. Emergency funds"
-    }
-]
-
-example_template = """
-User: {query}
-AI: {answer}
-"""
-
-example_prompt = PromptTemplate(
-    input_variables=["query", "answer"],
-    template=example_template
+from langchain_google_genai import ChatGoogleGenerativeAI
+import google.generativeai as genai
+from langchain.prompts import PromptTemplate
+from auth import login_user, register_user
+from dotenv import load_dotenv
+import prompts
+from functions import define_functions
+import os
+import json
+import re
+load_dotenv()
+from flight_search import (
+    search_flight,
+    book_flight,
+    get_flight_history,
+    check_prices,
+    delete_flight,
+    status_flight
 )
 
-prompt = """You are a helpful flight information assistant. When responding to questions about flights and budgets:
-1. Compare the ticket price with any mentioned budget
-2. If the price is higher than the budget:
-   - Express empathy
-   - Suggest alternatives
-   - Provide money-saving tips
-3. If the price is within budget:
-   - Confirm affordability
-   - Suggest how to use remaining budget
-   - Provide booking tips
-4. Always consider:
-   - Flight duration
-   - Price-to-duration value
-   - Seasonal price variations
-   - Booking timing
+API = os.getenv('GOOGLE_API_KEY')
+genai.configure(api_key=API)
 
-For example:
-
-User: Can I fly to London with $400?
-Assistant: I found a flight to London that costs $850. Unfortunately, this is $450 above your budget. I'd recommend:
-- Waiting for seasonal promotions
-- Checking budget airlines
-- Looking at connecting flights
-- Setting up price alerts for better deals
-
-User: I have $2000 for a flight to Paris
-Assistant: Great news! The flight to Paris costs $580, which is well within your $2000 budget. You'll have $1420 remaining that you could use for:
-- Hotel accommodations
-- Local transportation
-- Travel insurance
-- Emergency funds
-I recommend booking soon to secure this price.
-
-Remember to:
-- Be clear about price comparisons
-- Show empathy when prices are above budget
-- Provide practical alternatives and tips
-- Consider the total travel experience
-- Suggest ways to save money or use remaining budget wisely
-"""
-
-prefix = """The following are excerpts from conversations with an AI assistant. The assistant is helpful, polite, and provides useful responses to the users' questions about flight data. Here are some examples:
-"""
-suffix = """
-User: {query}
-AI: """
-
-few_shot_prompt = FewShotPromptTemplate(
-    examples=examples,
-    example_prompt=example_prompt,
-    prefix=prefix,
-    suffix=suffix,
-    input_variables=["query"],
-    example_separator="\n\n"
-)
-
-def main():
-    model_adi = "Qwen/Qwen2.5-0.5B-Instruct"
-
-    llm = huggingface_model_upload(model_adi)
-
-    chain = LLMChain(
-        llm=llm,
-        prompt=few_shot_prompt,
-        verbose=True
+def run_chatbot():
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash",
+        temperature=0.7,
+        top_p=0.9,
+        top_k=40,
+        max_output_tokens=2048,
+        google_api_key=API,
+        functions=define_functions(),
+        response_format="json"
     )
-    return chain
 
-def run_chatbot_with_opensearch(chain, o_s_client):
-    print("Few Shot Learning with Opensearch Data")
-    print("----------------------------------------")
-    if o_s_client:
-        print("Bağlantı başarılı!")
-        while True:
-            user_query = input("\nSoru (çıkmak için 'q'): ")
+    prompt = PromptTemplate(
+        template=prompts.create_prompt_template(),
+        input_variables=["query"]
+    )
+    chain = LLMChain(llm=llm, prompt=prompt)
+    current_user = None
+    
+    def process_function_call(response_text: str, current_user: dict):
+        try:
+            cleaned_text = re.sub(r"```json|```", "", response_text).strip()
+            response = json.loads(cleaned_text)
+            function_name = response.get("function")
+            params = response.get("args",response)
+
+        except json.JSONDecodeError:
+            print(f"Invalid JSON response: {cleaned_text}")
+            return {"success": False, "error": "Invalid JSON format"}
+
+        if function_name == "get_flight_history":
+            result = get_flight_history(current_user["username"])
+            if result.get("success") and result.get("flights"):
+                print("\nYour Flight History:")
+                for flight in result["flights"]:
+                    print(f"\nFrom: {flight.get('origin')}")
+                    print(f"To: {flight.get('destination')}")
+                    print(f"Price: ${flight.get('price')}")
+            return result
+
+        elif function_name == "search_flights":
+            result = search_flight(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                user_id=current_user["user_id"]
+            )
+            if result.get("success"):
+                print(f"\nAvailable Flights:")
+                print(f"From: {result.get('origin')}")
+                print(f"To: {result.get('destination')}")
+                print(f"Price: ${result.get('price')}")
+            return result
+
+        elif function_name == "check_prices":
+            result = check_prices(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city")
+            )
+            if result.get("success"):
+                print(f"\nPrice Check Results:")
+                print(f"From: {result.get('origin')}")
+                print(f"To: {result.get('destination')}")
+                print(f"Price: ${result.get('price')}")
+            return result
+
+        elif function_name == "book_flight":
+            result = book_flight(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                budget=float(params.get("budget")),
+                user_id=current_user["user_id"]
+            )
+            if result.get("success"):
+                print(f"\nFlight Booked Successfully!")
+                print(f"From: {result.get('origin')}")
+                print(f"To: {result.get('destination')}")
+                print(f"Price: ${result.get('price')}")
+            return result
+        elif function_name == "delete_flight":
+            result = delete_flight(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                user_id=current_user["user_id"]
+            )
+            if result.get("success"):
+                print(f"\nFlight Deleted Successfully!")
+                print(f"From: {result.get('origin')}")
+                print(f"To: {result.get('destination')}")
+            return result
+        elif function_name == "status_flight":
+            result = status_flight(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                user_id=current_user["user_id"],
+                new_status=params.get("new_status")
+            )
+            if result.get("success"):
+                print(f"\nFlight Status:")
+                print(f"Ticket ID: {result.get('ticket_id')}")
+                print(f"Status: {result.get('status')}")
+            return result
+        else:
+            print(f"Unknown function: {function_name}")
+            return {"success": False, "error": f"Unknown function: {function_name}"}
+
+
+    while True:
+        try:
+            if not current_user:
+                print("\n1. Login")
+                print("2. Register")
+                print("3. Quit")
+                choice = input("Choose an option (1-3): ")
+                
+                if choice == "3":
+                    break
+                
+                username = input("Username: ")
+                password = input("Password: ")
+                
+                if choice == "1":
+                    result = login_user(username, password)
+                else:
+                    result = register_user(username, password)
+
+                if result.get("success"):
+                    current_user = result
+                    print(f"\nWelcome{' back' if choice == '1' else ''}, {current_user['username']}!")
+                else:
+                    print(f"\nError: {result.get('error')}")
+                continue
+            
+            user_query = input("\nHow can I help you? (q to quit, logout to switch user): ")
+
             if user_query.lower() == 'q':
                 break
-
-            try:
-
-                flight_info = get_flight_information(user_query=user_query, query=user_query)
+            elif user_query.lower() == 'logout':
+                current_user = None
+                continue
                 
-
-                context = ""
-                if "flight_info" in flight_info:
-                    flight_data = flight_info["flight_info"]
-                    context = f"""
-Based on the search results, I found this flight information:
-- Origin City: {flight_data.get('OriginCityName', 'N/A')}
-- Destination City: {flight_data.get('DestCityName', 'N/A')}
-- Flight Number: {flight_data.get('FlightNum', 'N/A')}
-- Flight Duration: {flight_data.get('FlightTimeMin', 'N/A')} minutes
-- Average Ticket Price: ${flight_data.get('AvgTicketPrice', 'N/A')}
-
-Additional Information:
-- This is an average price and may vary based on season
-- Flight prices typically increase closer to departure
-- Early booking usually offers better rates
-- Price includes basic economy ticket only
-"""
-                else:
-                    context = "I couldn't find any specific flight information in our database for your query."
-
-
-                enhanced_query = f"Context: {context}\nUser Question: {user_query}\nPlease provide a helpful response based on this information."
+            response = chain.invoke({"query": user_query})
+            print("Raw Response:", response)
+            response_text = str(response.get('text', '')).strip()
+            print(f"\nModel Response: {response_text}")  
+            result = process_function_call(response_text, current_user)
                 
-
-                ai_response = chain.invoke({"query": enhanced_query})
-                response = ai_response.get('text', '') if isinstance(ai_response, dict) else str(ai_response)
-                
-                print("\nAI Yanıtı:")
-                print("---------")
-                print(response.strip())
-                
-            except Exception as e:
-                print(f"Hata oluştu: {e}")
-    else:
-        print("Bağlantı başarısız!")
+        except Exception as e:
+            print(f"\nError in main loop: {str(e)}")
 
 if __name__ == "__main__":
-
-    chain = main()
-
-    run_chatbot_with_opensearch(chain,o_s_client)
+    run_chatbot()

@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
 # Copy the requirements file to the working directory
 COPY requirements.txt .
 
-# CPU versiyonu PyTorch için özel komut ve diğer bağımlılıkları yükle
+
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir psycopg2-binary && \
