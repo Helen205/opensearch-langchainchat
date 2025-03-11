@@ -1,3 +1,9 @@
+from client import OpenSearchClient
+
+o_s_client = OpenSearchClient()._connect()
+
+index_name = "flight_functions"
+
 def define_functions():
     return [
         {
@@ -204,3 +210,19 @@ def define_functions():
             }
         }
     ]
+
+for function in define_functions():
+    document = {
+        "name": function["name"],
+        "description": function["description"],
+        "parameters": function["parameters"]
+    }
+
+    response = o_s_client.index(
+        index=index_name,
+        body=document
+    )
+
+    print(f"Fonksiyon kaydedildi: {function['name']}")
+    print(response)
+

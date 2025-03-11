@@ -1,5 +1,7 @@
 from client import PostgresClient, OpenSearchClient
 from vector import encode_text, VECTOR_INDEX
+from decimal import Decimal
+from prompts import function_prompt
 
 p_client = PostgresClient()._connect()
 o_s_client = OpenSearchClient()._connect()
@@ -57,6 +59,92 @@ def search_flight(origin_city: str, dest_city: str, user_id: int) -> dict:
     finally:
         if 'cursor' in locals():
             cursor.close()
+def get_flight_data(user_id):
+    try:
+        cursor = p_client.cursor()
+        
+        query = """
+        SELECT 
+            u.user_name, 
+            t.status, 
+            u.id AS user_id,
+            v.dest_city_name AS destination_city, 
+            v.origin_city_name AS origin_city,
+            v.avg_ticket_price
+        FROM  users u JOIN tickets t ON u.id = t.user_id 
+        JOIN voyages v ON t.voyage_id = v.id
+        WHERE  u.id = %s ORDER BY t.id DESC
+        LIMIT 1
+        """
+        
+        cursor.execute(query, (user_id,))
+        result = cursor.fetchone()
+        
+        if not result:
+            return {
+                "user_name": "Guest",
+                "status": False,
+                "user_id": user_id,
+                "destination_city": "Paris",
+                "origin_city": "Istanbul", 
+                "avg_ticket_price": 500.0
+            }
+        
+        return {
+            "user_name": result[0],
+            "status": result[1],
+            "user_id": result[2],
+            "destination_city": result[3],
+            "origin_city": result[4],
+            "avg_ticket_price": float(result[5])
+        }
+        
+    except Exception as e:
+        print(f"Veri getirme hatası: {str(e)}")
+        return {
+            "user_name": "Guest",
+            "status": False,
+            "user_id": user_id,
+            "destination_city": "Paris",
+            "origin_city": "Istanbul",
+            "avg_ticket_price": 500.0
+        }
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+            p_client.commit()
+
+def format_user_context(user_data):
+    status_text = "active" if user_data["status"] else "suspended"
+    
+    context = f"""USER CONTEXT:
+- Username: {user_data["user_name"]}
+- Recent flight route: {user_data["origin_city"]} to {user_data["destination_city"]}
+- Ticket price: ${user_data["avg_ticket_price"]:.2f}
+- Ticket status: {status_text}
+"""
+    return context
+
+def process_query(query, user_id=1):
+    user_data = get_flight_data(user_id)
+    
+
+    user_context = format_user_context(user_data)
+    
+
+    dynamic_prompt = function_prompt.format(
+        query=query,
+        user_id=user_data["user_id"],
+        user_name=user_data["user_name"],
+        origin_city=user_data["origin_city"],
+        destination_city=user_data["destination_city"],
+        status=user_data["status"],
+        avg_ticket_price=user_data["avg_ticket_price"],
+        user_context=user_context
+    )
+    
+    
+    return dynamic_prompt
 
 def check_prices(origin_city: str, dest_city: str) -> dict:
     try:
@@ -99,29 +187,25 @@ def book_flight(origin_city: str, dest_city: str, budget: float, user_id: int) -
     try:
         cursor = p_client.cursor()
         price_query = """
-            SELECT id, avg_ticket_price 
-            FROM voyages 
+            SELECT avg_ticket_price 
+            FROM tickets 
             WHERE origin_city_name = %s AND dest_city_name = %s 
             ORDER BY id DESC 
             LIMIT 1
         """
         cursor.execute(price_query, (origin_city, dest_city))
         result = cursor.fetchone()
-        
-        if result:
-            voyages_id = result[0]  
-            flight_price = float(result[1])  
-        else:
-            return {"success": False, "error": "No available flights found"}
+        flight_price = float(result[0]) if result else 500.0
 
         if flight_price > budget:
             return {"success": False, "error": f"Price (${flight_price}) exceeds budget (${budget})"}
 
+        cursor = p_client.cursor()
         insert_query = """
-            INSERT INTO tickets (user_id, voyage_id)
-            VALUES (%s, %s)
+            INSERT INTO tickets (avg_ticket_price, dest_city_name, origin_city_name, user_id)
+            VALUES (%s, %s, %s, %s)
         """
-        cursor.execute(insert_query, (user_id, voyages_id))
+        cursor.execute(insert_query, (flight_price, dest_city, origin_city, user_id))
         p_client.commit()
         
         return {
@@ -129,12 +213,16 @@ def book_flight(origin_city: str, dest_city: str, budget: float, user_id: int) -
             "price": flight_price,
             "origin": origin_city,
             "destination": dest_city,
-            "id": voyages_id,
             "user_id": user_id
         }
+        
     except Exception as e:
-        p_client.rollback()
+        if 'cursor' in locals():
+            p_client.rollback()
         return {"success": False, "error": str(e)}
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
 
 
 def get_flight_history(username: str) -> dict:
@@ -247,6 +335,148 @@ def delete_flight(origin_city: str, dest_city: str, user_id: int) -> dict:
         return {"success": True, "message": f"Bilet başarıyla iptal edildi. (Bilet ID: {ticket_id})"}
 
     except Exception as e:
+        p_client.rollback()
+        return {"success": False, "error": str(e)}
+
+    finally:
+        cursor.close()
+
+def sale_flight(origin_city: str, dest_city: str, user_id: int) -> dict:
+    try:
+        cursor = p_client.cursor()
+
+        query = """
+        SELECT v.id, v.avg_ticket_price
+        FROM voyages v
+        WHERE v.origin_city_name = %s
+        AND v.dest_city_name = %s
+        ORDER BY v.id DESC
+        LIMIT 1;
+        """ 
+        cursor.execute(query, (origin_city, dest_city))
+        result = cursor.fetchone()
+
+        if not result:
+            return {"success": False, "error": "Uygun sefer bulunamadı."}
+        
+        price = (result[1] * Decimal(0.8))
+        voyage_id = result[0]
+
+        insert_query = """
+            INSERT INTO tickets (user_id, voyage_id, price)
+            VALUES (%s, %s, %s)
+        """ 
+        cursor.execute(insert_query, (user_id, voyage_id, price))
+        p_client.commit()
+
+        return {"success": True, "message": f"Bilet başarıyla satın alındı. (Bilet ID: {voyage_id})"}
+
+    except Exception as e:
+        p_client.rollback()
+        return {"success": False, "error": str(e)}
+
+    finally:
+        cursor.close()
+def ticket_transfer_to_user(origin_city: str, dest_city: str, user_id: int, new_user_name: str) -> dict:
+    try:
+        cursor = p_client.cursor()
+
+        query = """
+        SELECT v.id, v.avg_ticket_price
+        FROM voyages v
+        JOIN tickets t ON v.id = t.voyage_id
+        WHERE v.origin_city_name = %s
+        AND v.dest_city_name = %s
+        ORDER BY v.id DESC
+        LIMIT 1;
+        """
+        
+        cursor.execute(query, (origin_city, dest_city))
+        result = cursor.fetchone()
+
+        if not result:
+            return {"success": False, "error": "Uygun sefer bulunamadı."}   
+        
+        voyage_id = result[0]
+        user_query = """
+            SELECT id
+            FROM users
+            WHERE user_name = %s
+        """
+        cursor.execute(user_query, (new_user_name,))
+        new_user_id = cursor.fetchone()[0]
+        
+
+        update_query = """
+            UPDATE tickets
+            SET user_id = %s
+            WHERE user_id = %s AND voyage_id = %s
+        """ 
+        cursor.execute(update_query, (new_user_id, voyage_id, user_id))
+        p_client.commit()
+
+        print({"success": True, "message": f"Bilet başarıyla transfer edildi. (Bilet ID: {voyage_id})"})
+
+    except Exception as e:
+        p_client.rollback() 
+        return {"success": False, "error": str(e)}
+
+    finally:
+        cursor.close()
+def ticket_transfer(origin_city: str, dest_city: str, user_id: int, new_origin_city: str, new_dest_city: str) -> dict:
+    try:
+        cursor = p_client.cursor()
+
+        query = """
+        SELECT v.id, v.avg_ticket_price
+        FROM voyages v
+        JOIN tickets t ON v.id = t.voyage_id
+        WHERE v.origin_city_name = %s
+        AND v.dest_city_name = %s
+        ORDER BY v.id DESC  
+        LIMIT 1;
+        """
+        cursor.execute(query, (origin_city, dest_city))
+        result = cursor.fetchone()
+
+        if not result:
+            return {"success": False, "error": "Uygun sefer bulunamadı."}  
+        
+        voyage_id = result[0]
+        ticket_price = result[1]
+        
+        new_voyage_query = """
+            SELECT id, avg_ticket_price
+            FROM voyages
+            WHERE origin_city_name = %s
+            AND dest_city_name = %s
+            ORDER BY id DESC
+            LIMIT 1;
+        """
+        cursor.execute(new_voyage_query, (new_origin_city, new_dest_city))
+        new_voyage_result = cursor.fetchone()
+
+        if not new_voyage_result:
+            return {"success": False, "error": "Uygun sefer bulunamadı."}
+        
+        new_voyage_id = new_voyage_result[0]
+        new_ticket_price = new_voyage_result[1]
+
+        if new_ticket_price < ticket_price:
+            price = ticket_price - new_ticket_price
+            update_query = """
+                UPDATE tickets
+                SET voyage_id = %s
+                WHERE user_id = %s AND voyage_id = %s
+            """
+            cursor.execute(update_query, (new_voyage_id, user_id, voyage_id))
+            p_client.commit()
+            print({"success": True, "message": f"Successfully transferred ticket. Price difference: ${price}"})
+        else:
+            print({"error": False, "error_message": f"New ticket price is higher than the old one."})
+        
+
+    except Exception as e:  
         p_client.rollback()
         return {"success": False, "error": str(e)}
 
