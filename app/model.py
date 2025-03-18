@@ -1,16 +1,10 @@
-from langchain.chains import LLMChain
 from langchain_google_genai import ChatGoogleGenerativeAI
 import google.generativeai as genai
-from langchain.prompts import PromptTemplate
 from auth import login_user, register_user
-from dotenv import load_dotenv
-import prompts
-from vector import encode_text
 from client import OpenSearchClient
 import os
 import json
-import re
-load_dotenv()
+from typing import Dict, Any
 from flight_search import (
     search_flight,
     book_flight,
@@ -20,10 +14,18 @@ from flight_search import (
     status_flight,
     sale_flight,
     ticket_transfer_to_user,
-    ticket_transfer,
+    exchange_ticket,
     get_flight_data,
-    format_user_context
+    get_flight_data
 )
+import json
+import re
+from prompts import create_prompts
+from search import knn_search_functions
+from dotenv import load_dotenv
+from cache import ChatHistoryCache
+
+load_dotenv()
 
 API = os.getenv('GOOGLE_API_KEY')
 genai.configure(api_key=API)
@@ -38,11 +40,12 @@ def run_chatbot():
         top_k=40,
         max_output_tokens=2048,
         google_api_key=API,
-        functions=knn_search_functions,
-        response_format="json"
+        response_format="json",
+        function=knn_search_functions
     )
 
     current_user = None
+    chat_history = None
     
     while True:
         try:
@@ -65,6 +68,7 @@ def run_chatbot():
 
                 if result.get("success"):
                     current_user = result
+                    chat_history = ChatHistoryCache(current_user["user_id"])
                     print(f"\nWelcome{' back' if choice == '1' else ''}, {current_user['username']}!")
                 else:
                     print(f"\nError: {result.get('error')}")
@@ -77,203 +81,256 @@ def run_chatbot():
                 current_user = None
                 continue
 
-            # Kullanıcı verilerini al
+
             user_data = get_flight_data(current_user["user_id"])
-            user_context = format_user_context(user_data)
 
-            # Function prompt'u dinamik olarak oluştur
-            function_prompt = PromptTemplate(
-                template=prompts.function_prompt,
-                input_variables=["query", "user_id", "user_name", "origin_city", 
-                               "destination_city", "status", "avg_ticket_price", "user_context"]
-            )
             
-            # Function chain'i çalıştır
-            function_chain = LLMChain(llm=llm, prompt=function_prompt)
-            function_response = function_chain.invoke({
-                "query": user_query,
-                "user_id": user_data["user_id"],
-                "user_name": user_data["user_name"],
-                "origin_city": user_data["origin_city"],
-                "destination_city": user_data["destination_city"],
-                "status": user_data["status"],
-                "avg_ticket_price": user_data["avg_ticket_price"],
-                "user_context": user_context
-            })
 
-            # Answer prompt'u dinamik olarak oluştur
-            answer_prompt = PromptTemplate(
-                template=prompts.answer_prompt,
-                input_variables=["query", "function_response", "user_context"]
-            )
+            similar_functions = knn_search_functions(user_query,k=3)
 
-            # Answer chain'i çalıştır
-            answer_chain = LLMChain(llm=llm, prompt=answer_prompt)
-            answer_response = answer_chain.invoke({
-                "query": user_query,
-                "function_response": function_response["text"],
-                "user_context": user_context
-            })
+            if not similar_functions['available_functions']:
+                print("\nNo relevant functions found for your query.")
+                continue
 
-            # Suggest prompt'u hazırla
-            suggest_prompt = PromptTemplate(
-                template=prompts.suggest_prompt,
-                input_variables=["query"]
-            )
+            prompt_context = {
+                'available_functions': similar_functions.get('available_functions',{}),
+                'query': user_query,
+                'user_context': {
+                    'user_id': current_user['user_id'],
+                    'username': current_user['username'],
+                    'current_flight': user_data if user_data else None
+                },
+            }
+            print(prompt_context)
 
-            # Yanıtları işle
+            print(chat_history.messages)
+            prompts = create_prompts(prompt_context)
+            
+            function_chain = prompts['function_prompt'] | llm
+            suggest_chain = prompts['suggest_prompt'] | llm
+            answer_chain = prompts['answer_prompt'] | llm
+
             try:
-                function_text = function_response.get('text', '').strip()
-                answer_text = answer_response.get('text', '').strip()
+                function_response = function_chain.invoke(prompt_context)
+                function_text = function_response.content if hasattr(function_response, 'content') else str(function_response)
                 
-                print(f"\nFunction Response: {function_text}")
-                print(f"\nAnswer Response: {answer_text}")
-                
-                # JSON parse etmeyi dene
                 try:
-                    parsed_text = json.loads(function_text.strip('```json\n').strip())
-                    if not parsed_text:
-                        suggest_chain = LLMChain(llm=llm, prompt=suggest_prompt)
-                        suggest_response = suggest_chain.invoke({"query": user_query})
-                        print(f"\nSuggestion: {suggest_response.get('text', '')}")
+                    function_data = json.loads(function_text.strip().replace('```json', '').replace('```', ''))
+                    
+                    if function_data.get("function") == "404_NOT_FOUND" or "error" in function_data:
+                        suggestion = suggest_chain.invoke(prompt_context)
+                        suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
+                        print(f"\n{suggestion_text}")
+                        continue
+                    
+                    result = process_function_call(json.dumps(function_data), current_user)
+                    if result and isinstance(result, dict):
+                        if result.get('success'):
+                            chat_history.add_message(
+                                role="user",
+                                content=user_query,
+                                function_call=function_data
+                            )
+
+                            if 'message' in result:
+                                print(f"\n{result['message']}")
+
+                            answer_context = {
+                                **prompt_context,
+                                'function_result': json.dumps(result) 
+                            }
+                            answer = answer_chain.invoke(answer_context)
+                            answer_text = answer.content if hasattr(answer, 'content') else str(answer)
+                            
+                            if answer_text:
+                                print(f"Response: {answer_text}")
+
+                            chat_history.add_message(
+                                role="assistant",
+                                content=answer_text,
+                                function_result=result
+                            )
+                        else:
+                            print(f"\nError: {result.get('error', 'Unknown error occurred')}")
+                            suggestion = suggest_chain.invoke(prompt_context)
+                            suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
+                            print(f"\n{suggestion_text}")
+                    else:
+                        print("\nError: Invalid response format")
+                        suggestion = suggest_chain.invoke(prompt_context)
+                        suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
+                        print(f"\n{suggestion_text}")
+                    
                 except json.JSONDecodeError:
-                    print("Invalid JSON format in function response")
-                
-                result = process_function_call(function_text, current_user)
-                
+                    suggestion = suggest_chain.invoke(prompt_context)
+                    suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
+                    print(f"\n{suggestion_text}")
+                    continue
+
             except Exception as e:
-                print(f"\nError processing responses: {str(e)}")
-                
+                print(f"\nError: {str(e)}")
+                try:
+                    suggestion = suggest_chain.invoke(prompt_context)
+                    suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
+                    print(f"\n{suggestion_text}")
+                except Exception as suggest_error:
+                    print(f"\nError in suggestion: {str(suggest_error)}")
+                continue
+
         except Exception as e:
             print(f"\nError in main loop: {str(e)}")
+            continue
 
-def process_function_call(response_text: str, current_user: dict):
+def process_function_call(function_data: str, current_user: Dict[str, Any]):
     try:
-        cleaned_text = re.sub(r"```json|```", "", response_text).strip()
+        cleaned_text = re.sub(r"```json|```", "", function_data).strip()
         response = json.loads(cleaned_text)
         function_name = response.get("function")
-        params = response.get("args",response)
-        user_data = get_flight_data(current_user["user_id"])
+        params = response.get("args", {})
+
+        if function_name == "404_NOT_FOUND":
+            similar_functions = knn_search_functions(params.get("query", ""), k=3)
+            suggestions = [
+                f"Try '{func['function']}' - {func['description']}"
+                for func in similar_functions.get('suggested_alternatives', [])
+            ]
+            if not suggestions:
+                suggestions = [
+                    "Try 'search flights from [city] to [city]' to check status",
+                    "Try 'delete flight from [city] to [city]' to cancel",
+                    "Try 'suspend flight from [city] to [city]' to suspend"
+                ]
+            return {
+                "success": False,
+                "error": "No matching function found",
+                "suggestions": suggestions
+            }
+
+        if "user_id" not in params:
+            params["user_id"] = current_user["user_id"]
+
+        if not (params.get("origin_city") and params.get("dest_city")):
+            user_data = get_flight_data(current_user["user_id"])
+            if user_data:
+                params["origin_city"] = user_data.get("origin_city")
+                params["dest_city"] = user_data.get("destination_city")
+                print(f"\nUsing default cities - From: {params['origin_city']} To: {params['dest_city']}")
+
+        function_mapping = {
+            "get_flight_history": get_flight_history,
+            "search_flights": search_flight,
+            "check_prices": check_prices,
+            "book_flight": book_flight,
+            "delete_flight": delete_flight,
+            "status_flight": status_flight,
+            "sale_flight": sale_flight,
+            "ticket_transfer_to_user": ticket_transfer_to_user,
+            "exchange_ticket": exchange_ticket
+        }
+
+        if function_name not in function_mapping:
+            return {
+                "success": False,
+                "error": f"Unknown function: {function_name}",
+                "suggestions": [
+                    "Try 'search flights' to check status",
+                    "Try 'delete flight' to cancel",
+                    "Try 'suspend flight' to suspend"
+                ]
+            }
+
+        if function_name == "get_flight_history":
+            result = get_flight_history(current_user["username"])
+            return result
+
+        elif function_name == "search_flights":
+            result = search_flight(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                user_id=current_user["user_id"]
+            )
+            return result
+
+        elif function_name == "check_prices":
+            result = check_prices(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city")
+            )
+            return result
+
+        elif function_name == "book_flight":
+            if params.get("budget") is None:
+                query = response.get("query", "")
+                budget_match = re.search(r'budget\s*\$?(\d+(?:\.\d+)?)', query)
+                if budget_match:
+                    budget = float(budget_match.group(1))
+                else:
+                    budget = 520.0 
+            else:
+                budget = float(params.get("budget"))
+            
+            result = book_flight(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                budget=budget,
+                user_id=current_user["user_id"]
+            )
+            return result
+        elif function_name == "delete_flight":
+            result = delete_flight(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                user_id=current_user["user_id"]
+            )
+            return result
+        elif function_name == "status_flight":
+            result = status_flight(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                user_id=current_user["user_id"],
+                new_status=params.get("new_status")
+            )
+            return result
+        elif function_name == "sale_flight":
+            result = sale_flight(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                user_id=current_user["user_id"]
+            )
+            return result
+        elif function_name == "ticket_transfer_to_user":
+            result = ticket_transfer_to_user(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                user_id=current_user["user_id"],
+                new_user_name=params.get("new_user_name")
+            )
+            return result
+        elif function_name == "exchange_ticket":
+            result = exchange_ticket(
+                origin_city=params.get("origin_city"),
+                dest_city=params.get("dest_city"),
+                user_id=current_user["user_id"],
+                new_origin_city=params.get("new_origin_city"),
+                new_dest_city=params.get("new_dest_city")
+            )
+            return result
+        else:
+            print(f"Unknown function: {function_name}")
+            return {"success": False, "error": f"Unknown function: {function_name}"}
+
 
     except json.JSONDecodeError:
-        return {"success": False, "error": "Invalid JSON format"}
-
-    if function_name == "get_flight_history":
-        result = get_flight_history(current_user["username"])
-        if result.get("success") and result.get("flights"):
-            print("\nYour Flight History:")
-            for flight in result["flights"]:
-                print(f"\nFrom: {flight.get('origin')}")
-                print(f"To: {flight.get('destination')}")
-                print(f"Price: ${flight.get('price')}")
-        return result
-
-    elif function_name == "search_flights":
-        result = search_flight(
-            origin_city=params.get("origin_city"),
-            dest_city=params.get("dest_city"),
-            user_id=current_user["user_id"]
-        )
-        if result.get("success"):
-            print(f"\nAvailable Flights:")
-            print(f"From: {result.get('origin')}")
-            print(f"To: {result.get('destination')}")
-            print(f"Price: ${result.get('price')}")
-        return result
-
-    elif function_name == "check_prices":
-        result = check_prices(
-            origin_city=params.get("origin_city"),
-            dest_city=params.get("dest_city")
-        )
-        if result.get("success"):
-            print(f"\nPrice Check Results:")
-            print(f"From: {result.get('origin')}")
-            print(f"To: {result.get('destination')}")
-            print(f"Price: ${result.get('price')}")
-        return result
-
-    elif function_name == "book_flight":
-        result = book_flight(
-            origin_city=params.get("origin_city"),
-            dest_city=params.get("dest_city"),
-            budget=float(params.get("budget")),
-            user_id=current_user["user_id"]
-        )
-        if result.get("success"):
-            print(f"\nFlight Booked Successfully!")
-            print(f"From: {result.get('origin')}")
-            print(f"To: {result.get('destination')}")
-            print(f"Price: ${result.get('price')}")
-        return result
-    elif function_name == "delete_flight":
-        result = delete_flight(
-            origin_city=params.get("origin_city"),
-            dest_city=params.get("dest_city"),
-            user_id=current_user["user_id"]
-        )
-        if result.get("success"):
-            print(f"\nFlight Deleted Successfully!")
-            print(f"From: {result.get('origin')}")
-            print(f"To: {result.get('destination')}")
-        return result
-    elif function_name == "status_flight":
-        result = status_flight(
-            origin_city=params.get("origin_city"),
-            dest_city=params.get("dest_city"),
-            user_id=current_user["user_id"],
-            new_status=params.get("new_status")
-        )
-        if result.get("success"):
-            print(f"\nFlight Status:")
-            print(f"Ticket ID: {result.get('ticket_id')}")
-            print(f"Status: {result.get('status')}")
-        return result
-    elif function_name == "sale_flight":
-        result = sale_flight(
-            origin_city=params.get("origin_city"),
-            dest_city=params.get("dest_city"),
-            user_id=current_user["user_id"]
-        )
-        return result
-    elif function_name == "ticket_transfer_to_user":
-        result = ticket_transfer_to_user(
-            origin_city=params.get("origin_city"),
-            dest_city=params.get("dest_city"),
-            user_id=current_user["user_id"],
-            new_user_name=params.get("new_user_name")
-        )
-        return result
-    elif function_name == "ticket_transfer":
-        result = ticket_transfer(
-            origin_city=params.get("origin_city"),
-            dest_city=params.get("dest_city"),
-            user_id=current_user["user_id"],
-            new_origin_city=params.get("new_origin_city"),
-            new_dest_city=params.get("new_dest_city")
-        )
-        return result
-    else:
-        print(f"Unknown function: {function_name}")
-        return {"success": False, "error": f"Unknown function: {function_name}"}
-
-def knn_search_functions(user_query, k=5):
-    query_vector = encode_text(user_query)
-    query = {
-        "size": k,  
-        "query": {
-            "knn": {
-                "vector": {
-                    "vector": query_vector,
-                    "k": k
-                }
-            }
+        return {
+            "success": False,
+            "error": "Invalid JSON format",
+            "suggestions": ["Please try again with a clearer command"]
         }
-    }
-    
-    response = o_s_client.search(index="functions_flight_vector", body=query)
-    return response
-
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "suggestions": ["Please try again with a clearer command"]
+        }
 if __name__ == "__main__":
     run_chatbot()
-

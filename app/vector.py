@@ -6,6 +6,7 @@ import torch
 import numpy as np
 import urllib3
 from tqdm import tqdm  
+from functions import define_functions
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -181,6 +182,138 @@ def copy_and_vectorize_data():
     
     return success_count > 0
 
+FUNCTION_INDEX = "flight_functions_vectors"
+
+function_index_settings = {
+    "settings": {
+        "index": {
+            "number_of_shards": 1,
+            "number_of_replicas": 1,
+            "knn": True,
+            "knn.algo_param.ef_search": 100,
+            "knn.algo_param.ef_construction": 100,
+            "knn.algo_param.m": 16
+        }
+    },
+    "mappings": {
+        "properties": {
+            "function_name": {"type": "keyword"},
+            "description": {"type": "text"},
+            "vector": {
+                "type": "knn_vector",
+                "dimension": 768,
+                "method": {
+                    "name": "hnsw",
+                    "space_type": "l2",
+                    "engine": "nmslib",
+                    "parameters": {
+                        "ef_construction": 100,
+                        "m": 16
+                    }
+                }
+            }
+        }
+    }
+}
+
+def delete_function_index():
+    """Delete function vector index if exists"""
+    try:
+        url = f"{OPENSEARCH_HOST}/{FUNCTION_INDEX}"
+        response = requests.delete(
+            url,
+            auth=HTTPBasicAuth(OPENSEARCH_USER, OPENSEARCH_PASS),
+            verify=False,
+            headers=headers
+        )
+        if response.status_code in [200, 404]:
+            print(f"Function index deleted or not exists: {FUNCTION_INDEX}")
+            return True
+        else:
+            print(f"Error deleting function index: {response.text}")
+            return False
+    except Exception as e:
+        print(f"Error in deletion: {e}")
+        return False
+
+def create_function_index():
+    """Create index for function vectors"""
+    try:
+        url = f"{OPENSEARCH_HOST}/{FUNCTION_INDEX}"
+        response = requests.put(
+            url,
+            auth=HTTPBasicAuth(OPENSEARCH_USER, OPENSEARCH_PASS),
+            json=function_index_settings,
+            verify=False,
+            headers=headers
+        )
+        
+        if response.status_code in [200, 201]:
+            print(f"Function vector index created successfully: {response.json()}")
+            return True
+        else:
+            print(f"Error creating function vector index: {response.text}")
+            return False
+    except Exception as e:
+        print(f"Error in creation: {e}")
+        return False
+
+def initialize_function_vectors():
+    """Initialize function vectors in OpenSearch"""
+    try:
+        # Delete existing index
+        delete_function_index()
+        
+        # Create new index
+        if not create_function_index():
+            return False
+            
+        print("\nVectorizing functions and storing in OpenSearch...")
+        success_count = 0
+        
+        for func in define_functions():
+            # Get function details
+            function_name = func.get('name')
+            description = func.get('description', '')
+            
+            # Create text representation using only name and description
+            text = f"{function_name} - {description}"
+            
+            print(f"\nProcessing function: {function_name}")
+            print(f"Text for vectorization: {text}")
+            
+            vector = encode_text(text)
+            
+            document = {
+                "function_name": function_name,
+                "description": description,
+                "parameters": func.get('parameters', {}),  # Store parameters but don't use in vectorization
+                "vector": vector.tolist() if hasattr(vector, 'tolist') else vector
+            }
+            
+            url = f"{OPENSEARCH_HOST}/{FUNCTION_INDEX}/_doc"
+            response = requests.post(
+                url,
+                auth=HTTPBasicAuth(OPENSEARCH_USER, OPENSEARCH_PASS),
+                json=document,
+                verify=False,
+                headers=headers
+            )
+            
+            if response.status_code in [200, 201]:
+                success_count += 1
+                print(f"Added function: {function_name}")
+            else:
+                print(f"Error adding function {function_name}: {response.text}")
+        
+        functions_count = len(define_functions())
+        print(f"\nInitialization complete! Added {success_count} of {functions_count} functions.")
+        return success_count > 0
+        
+    except Exception as e:
+        print(f"Error initializing function vectors: {e}")
+        return False
+
 if __name__ == "__main__":
     print("1. Vektör indeksi oluşturuluyor...")
     if create_vector_index():
@@ -193,3 +326,9 @@ if __name__ == "__main__":
             print("\nVeri kopyalama işleminde sorun oluştu!")
     else:
         print("\nVektör indeksi oluşturma işleminde sorun oluştu!")
+
+    print("Initializing function vectors...")
+    if initialize_function_vectors():
+        print("\nFunction vectors initialized successfully!")
+    else:
+        print("\nError initializing function vectors!")

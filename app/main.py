@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from client import OpenSearchClient, RedisClient
-from Models.Flight import FlightData
 import numpy as np
 from vector import encode_text, VECTOR_INDEX
 from pydantic import BaseModel
@@ -55,7 +54,7 @@ def search_flights(user_query: str = Query(...), query: str = Query(...)):
         query_vector = [float(x) for x in query_vector]
 
     search_payload = {
-        "size": 5,
+        "size": 5,  
         "query": {
             "bool": {
                 "must": [
@@ -68,7 +67,7 @@ def search_flights(user_query: str = Query(...), query: str = Query(...)):
                         }
                     },
                     {
-                        "knn": {
+            "knn": {
                             "vector": {
                                 "vector": query_vector,
                                 "k": 5
@@ -123,25 +122,7 @@ def check_index_data():
     response = o_s_client.search(index=FLIGHT_INDEX, body=query)
     return response
 
-@app.post("/add_flight")
-def add_flight(flight: FlightData):
-    """Yeni uçuş ekle ve vektörleştir"""
-    try:
 
-        text = f"Flight {flight.FlightNum} from {flight.OriginCityName} to {flight.DestCityName}"
-        vector = encode_text(text)
-        
-
-        flight_dict = flight.dict()
-        flight_dict['vector'] = vector.tolist() if hasattr(vector, 'tolist') else vector
-        
-
-        response = o_s_client.index(index=FLIGHT_INDEX, body=flight_dict)
-        return {"message": "Flight added successfully", "response": response}
-    except Exception as e:
-        return {"error": f"Error adding flight: {str(e)}"}
-
-@app.post("/add_test_data")
 def add_test_data():
     test_flights = [
         {
@@ -252,37 +233,6 @@ def search_user_flight(query: UserFlightQuery):
             "details": str(e.__class__.__name__)
         }
 
-# Kullanıcı aramalarını kontrol etmek için endpoint
-@app.get("/user_searches/{username}")
-def get_user_searches(username: str):
-    """Kullanıcının tüm aramalarını getir"""
-    try:
-        query = {
-            "query": {
-                "bool": {
-                    "must": [
-                        {"term": {"username.keyword": username}},
-                        {"term": {"search_type.keyword": "user_query"}}
-                    ]
-                }
-            },
-            "sort": [
-                {"search_timestamp": {"order": "desc"}}
-            ]
-        }
-        
-        response = o_s_client.search(
-            index=FLIGHT_INDEX,
-            body=query
-        )
-        
-        return {
-            "username": username,
-            "total_searches": response['hits']['total']['value'],
-            "searches": [hit['_source'] for hit in response['hits']['hits']]
-        }
-        
-    except Exception as e:
-        return {"error": f"Error fetching user searches: {str(e)}"}
+
 
 
