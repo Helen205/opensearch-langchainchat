@@ -287,9 +287,9 @@ def status_flight(origin_city: str, dest_city: str, user_id: int, new_status: bo
             p_client.commit()
             
             if new_status:
-                message = "Your ticket has been suspended."
-            else:
                 message = "Your ticket has been activated."
+            else:
+                message = "Your ticket has been suspended."
 
         return {"success": True, "message": message, "ticket_id": ticket_id, "status": new_status if new_status is not None else status}
 
@@ -320,7 +320,7 @@ def delete_flight(origin_city: str, dest_city: str, user_id: int) -> dict:
         result = cursor.fetchone()
 
         if not result:
-            return {"success": False, "error": "Bilet bulunamadı."}
+            return {"success": False, "error": "Ticket not found"}
 
         ticket_id = result[0]
 
@@ -331,7 +331,7 @@ def delete_flight(origin_city: str, dest_city: str, user_id: int) -> dict:
         cursor.execute(delete_query, (ticket_id,))
         p_client.commit()
 
-        return {"success": True, "message": f"Bilet başarıyla iptal edildi. (Bilet ID: {ticket_id})"}
+        return {"success": True, "message": f"Ticket successfully cancelled. (Ticket ID: {ticket_id})"}
 
     except Exception as e:
         p_client.rollback()
@@ -356,7 +356,7 @@ def sale_flight(origin_city: str, dest_city: str, user_id: int) -> dict:
         result = cursor.fetchone()
 
         if not result:
-            return {"success": False, "error": "Uygun sefer bulunamadı."}
+            return {"success": False, "error": "No suitable flight found"}
         
         price = (result[1] * Decimal(0.8))
         voyage_id = result[0]
@@ -368,7 +368,7 @@ def sale_flight(origin_city: str, dest_city: str, user_id: int) -> dict:
         cursor.execute(insert_query, (user_id, voyage_id, price))
         p_client.commit()
 
-        return {"success": True, "message": f"Bilet başarıyla satın alındı. (Bilet ID: {voyage_id})"}
+        return {"success": True, "message": f"Ticket successfully purchased. (Ticket ID: {voyage_id})"}
 
     except Exception as e:
         p_client.rollback()
@@ -395,7 +395,7 @@ def ticket_transfer_to_user(origin_city: str, dest_city: str, user_id: int, new_
         result = cursor.fetchone()
 
         if not result:
-            return {"success": False, "error": "Aktif bilet bulunamadı."}   
+            return {"success": False, "error": "No active ticket found"}   
         
         ticket_id, voyage_id, current_origin, current_dest = result
 
@@ -408,7 +408,7 @@ def ticket_transfer_to_user(origin_city: str, dest_city: str, user_id: int, new_
         new_user_result = cursor.fetchone()
         
         if not new_user_result:
-            return {"success": False, "error": f"Kullanıcı bulunamadı: {new_user_name}"}
+            return {"success": False, "error": f"User not found: {new_user_name}"}
             
         new_user_id = new_user_result[0]
 
@@ -422,7 +422,7 @@ def ticket_transfer_to_user(origin_city: str, dest_city: str, user_id: int, new_
 
         return {
             "success": True, 
-            "message": f"Bilet başarıyla {new_user_name} kullanıcısına transfer edildi. (Bilet ID: {ticket_id})",
+            "message": f"Ticket successfully transferred to {new_user_name}. (Ticket ID: {ticket_id})",
             "details": {
                 "from": current_origin,
                 "to": current_dest,
@@ -453,7 +453,7 @@ def exchange_ticket(origin_city: str, dest_city: str, user_id: int, new_origin_c
         result = cursor.fetchone()
 
         if not result:
-            return {"success": False, "error": "Uygun sefer bulunamadı."}  
+            return {"success": False, "error": "No suitable flight found"}  
         
         voyage_id = result[0]
         ticket_price = result[1]
@@ -470,7 +470,7 @@ def exchange_ticket(origin_city: str, dest_city: str, user_id: int, new_origin_c
         new_voyage_result = cursor.fetchone()
 
         if not new_voyage_result:
-            return {"success": False, "error": "Uygun sefer bulunamadı."}
+            return {"success": False, "error": "No suitable flight found"}
         
         new_voyage_id = new_voyage_result[0]
         new_ticket_price = new_voyage_result[1]

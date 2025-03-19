@@ -101,7 +101,6 @@ def run_chatbot():
                     'current_flight': user_data if user_data else None
                 },
             }
-            print(prompt_context)
 
             print(chat_history.messages)
             prompts = create_prompts(prompt_context)
@@ -113,6 +112,7 @@ def run_chatbot():
             try:
                 function_response = function_chain.invoke(prompt_context)
                 function_text = function_response.content if hasattr(function_response, 'content') else str(function_response)
+                print(f"\n{function_text}")
                 
                 try:
                     function_data = json.loads(function_text.strip().replace('```json', '').replace('```', ''))
@@ -132,16 +132,12 @@ def run_chatbot():
                                 function_call=function_data
                             )
 
-                            if 'message' in result:
-                                print(f"\n{result['message']}")
-
                             answer_context = {
                                 **prompt_context,
                                 'function_result': json.dumps(result) 
                             }
                             answer = answer_chain.invoke(answer_context)
                             answer_text = answer.content if hasattr(answer, 'content') else str(answer)
-                            
                             if answer_text:
                                 print(f"Response: {answer_text}")
 
@@ -216,28 +212,6 @@ def process_function_call(function_data: str, current_user: Dict[str, Any]):
                 params["dest_city"] = user_data.get("destination_city")
                 print(f"\nUsing default cities - From: {params['origin_city']} To: {params['dest_city']}")
 
-        function_mapping = {
-            "get_flight_history": get_flight_history,
-            "search_flights": search_flight,
-            "check_prices": check_prices,
-            "book_flight": book_flight,
-            "delete_flight": delete_flight,
-            "status_flight": status_flight,
-            "sale_flight": sale_flight,
-            "ticket_transfer_to_user": ticket_transfer_to_user,
-            "exchange_ticket": exchange_ticket
-        }
-
-        if function_name not in function_mapping:
-            return {
-                "success": False,
-                "error": f"Unknown function: {function_name}",
-                "suggestions": [
-                    "Try 'search flights' to check status",
-                    "Try 'delete flight' to cancel",
-                    "Try 'suspend flight' to suspend"
-                ]
-            }
 
         if function_name == "get_flight_history":
             result = get_flight_history(current_user["username"])
