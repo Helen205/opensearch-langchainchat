@@ -241,7 +241,7 @@ def get_flight_history(username: str) -> dict:
             "price": float(row[0]),
             "destination": row[1],
             "origin": row[2],
-            "username": row[3],
+            "user_name": row[3],
             "id": row[4]
         } for row in cursor.fetchall()]
         

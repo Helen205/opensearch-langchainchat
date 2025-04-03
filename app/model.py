@@ -1,7 +1,4 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
-import google.generativeai as genai
-from auth import login_user, register_user
-from client import OpenSearchClient
+from client import OpenSearchClient, PostgresClient
 import os
 import json
 from typing import Dict, Any
@@ -18,164 +15,107 @@ from flight_search import (
     get_flight_data,
     get_flight_data
 )
+import requests
 import json
 import re
 from prompts import create_prompts
 from search import knn_search_functions
 from dotenv import load_dotenv
-from cache import ChatHistoryCache
 
 load_dotenv()
 
-API = os.getenv('GOOGLE_API_KEY')
-genai.configure(api_key=API)
-
 o_s_client = OpenSearchClient()._connect()
+p_client = PostgresClient()._connect()
 
-def run_chatbot():
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
-        temperature=0.1,
-        top_p=0.9,
-        top_k=40,
-        max_output_tokens=2048,
-        google_api_key=API,
-        response_format="json",
-        function=knn_search_functions
-    )
-
-    current_user = None
-    chat_history = None
-    
-    while True:
-        try:
-            if not current_user:
-                print("\n1. Login")
-                print("2. Register")
-                print("3. Quit")
-                choice = input("Choose an option (1-3): ")
-                
-                if choice == "3":
-                    break
-                
-                username = input("Username: ")
-                password = input("Password: ")
-
-                if choice == "1":
-                    result = login_user(username, password)
-                else:
-                    result = register_user(username, password)
-
-                if result.get("success"):
-                    current_user = result
-                    chat_history = ChatHistoryCache(current_user["user_id"])
-                    print(f"\nWelcome{' back' if choice == '1' else ''}, {current_user['username']}!")
-                else:
-                    print(f"\nError: {result.get('error')}")
-                continue
-            
-            user_query = input("\nHow can I help you? (q to quit, logout to switch user): ")
-            if user_query.lower() == 'q':
-                break
-            elif user_query.lower() == 'logout':
-                current_user = None
-                continue
-
-
-            user_data = get_flight_data(current_user["user_id"])
-
-            
-
-            similar_functions = knn_search_functions(user_query,k=3)
-
-            if not similar_functions['available_functions']:
-                print("\nNo relevant functions found for your query.")
-                continue
-
-            prompt_context = {
-                'available_functions': similar_functions.get('available_functions',{}),
-                'query': user_query,
-                'user_context': {
-                    'user_id': current_user['user_id'],
-                    'username': current_user['username'],
-                    'current_flight': user_data if user_data else None
-                },
+def call_ollama(prompt: str, model: str = "qwen:0.5b", strategy: str = "ip-hash") -> str:
+    try:
+        endpoint = f"http://nginx:80/api/{strategy}/api/generate"
+        print(f"Using load balancing strategy: {strategy}")
+        
+        response = requests.post(
+            endpoint,
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "num_ctx": 2048,  
+                    "num_predict": 1024
+                }
             }
-
-            print(chat_history.messages)
-            prompts = create_prompts(prompt_context)
-            
-            function_chain = prompts['function_prompt'] | llm
-            suggest_chain = prompts['suggest_prompt'] | llm
-            answer_chain = prompts['answer_prompt'] | llm
-
-            try:
-                function_response = function_chain.invoke(prompt_context)
-                function_text = function_response.content if hasattr(function_response, 'content') else str(function_response)
-                print(f"\n{function_text}")
+        )
                 
-                try:
-                    function_data = json.loads(function_text.strip().replace('```json', '').replace('```', ''))
-                    
-                    if function_data.get("function") == "404_NOT_FOUND" or "error" in function_data:
-                        suggestion = suggest_chain.invoke(prompt_context)
-                        suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
-                        print(f"\n{suggestion_text}")
-                        continue
-                    
-                    result = process_function_call(json.dumps(function_data), current_user)
-                    if result and isinstance(result, dict):
-                        if result.get('success'):
-                            chat_history.add_message(
-                                role="user",
-                                content=user_query,
-                                function_call=function_data
-                            )
+        response.raise_for_status()
+        return response.json()["response"]
+    except Exception as e:
+        print(f"Error calling Ollama: {str(e)}")
+        return ""
 
-                            answer_context = {
-                                **prompt_context,
-                                'function_result': json.dumps(result) 
-                            }
-                            answer = answer_chain.invoke(answer_context)
-                            answer_text = answer.content if hasattr(answer, 'content') else str(answer)
-                            if answer_text:
-                                print(f"Response: {answer_text}")
 
-                            chat_history.add_message(
-                                role="assistant",
-                                content=answer_text,
-                                function_result=result
-                            )
-                        else:
-                            print(f"\nError: {result.get('error', 'Unknown error occurred')}")
-                            suggestion = suggest_chain.invoke(prompt_context)
-                            suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
-                            print(f"\n{suggestion_text}")
-                    else:
-                        print("\nError: Invalid response format")
-                        suggestion = suggest_chain.invoke(prompt_context)
-                        suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
-                        print(f"\n{suggestion_text}")
-                    
-                except json.JSONDecodeError:
-                    suggestion = suggest_chain.invoke(prompt_context)
-                    suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
-                    print(f"\n{suggestion_text}")
-                    continue
+def run_chatbot(user_query: str, user_id: dict):
+    try:
+        user_name = user_id["user_name"]
+        cursor = p_client.cursor()
+        query = "SELECT id FROM users WHERE user_name = %s"
+        cursor.execute(query, (user_name,))
+        user_data = cursor.fetchone()
+        
+        if not user_data:
+            return "Kullanıcı bulunamadı"
+            
+        user_data_dict = {
+            "user_id": user_data[0], 
+            "username": user_name
+        }
 
-            except Exception as e:
-                print(f"\nError: {str(e)}")
-                try:
-                    suggestion = suggest_chain.invoke(prompt_context)
-                    suggestion_text = suggestion.content if hasattr(suggestion, 'content') else str(suggestion)
-                    print(f"\n{suggestion_text}")
-                except Exception as suggest_error:
-                    print(f"\nError in suggestion: {str(suggest_error)}")
-                continue
+        user_flight_data = get_flight_data(user_data) if user_data else None
 
-        except Exception as e:
-            print(f"\nError in main loop: {str(e)}")
-            continue
+        similar_functions = knn_search_functions(user_query, k=3)
+
+        if not similar_functions['available_functions']:
+            return "No relevant functions found for your query."
+
+        prompt_context = {
+            'available_functions': similar_functions.get('available_functions',{}),
+            'query': user_query,
+            'user_context': {
+                'user_id': user_data_dict["user_id"],
+                'username': user_data_dict["username"],
+                'current_flight': user_flight_data if user_flight_data else None
+            }
+        }
+        prompts = create_prompts(prompt_context)
+        
+
+        
+        response = call_ollama(prompts['function_prompt'].format(**prompt_context), strategy="ip-hash")
+        
+        try:
+            function_data = json.loads(response.strip().replace('```json', '').replace('```', ''))
+            
+            if function_data.get("function") == "404_NOT_FOUND" or "error" in function_data:
+                return call_ollama(prompts['suggest_prompt'].format(**prompt_context))
+            
+            result = process_function_call(json.dumps(function_data), {"user_id": "test", "username": "test"})
+            
+            if result and isinstance(result, dict):
+                if result.get('success'):
+                    answer_context = {
+                        **prompt_context,
+                        'function_result': json.dumps(result)
+                    }
+                    return call_ollama(prompts['answer_prompt'].format(**answer_context))
+                else:
+                    return call_ollama(prompts['suggest_prompt'].format(**prompt_context))
+            else:
+                return call_ollama(prompts['suggest_prompt'].format(**prompt_context))
+                
+        except json.JSONDecodeError:
+            return call_ollama(prompts['suggest_prompt'].format(**prompt_context))
+            
+    except Exception as e:
+        return f"Error processing query: {str(e)}"
+
 
 def process_function_call(function_data: str, current_user: Dict[str, Any]):
     try:
@@ -308,3 +248,5 @@ def process_function_call(function_data: str, current_user: Dict[str, Any]):
         }
 if __name__ == "__main__":
     run_chatbot()
+
+

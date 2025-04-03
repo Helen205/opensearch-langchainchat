@@ -4,16 +4,6 @@ FROM python:3.9-slim
 # Set the working directory in the container
 WORKDIR /app
 
-# Sistem bağımlılıklarını yükle
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    git \
-    python3-dev \
-    libpq-dev \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy the requirements file to the working directory
 COPY requirements.txt .
 
